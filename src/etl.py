@@ -330,14 +330,153 @@ def load_data(
         RuntimeError: If one or more staging or merge steps fail.
     """
     if IS_GCP:
-        _load_to_bigquery(dim_branch,  "dim_branch")
-        _load_to_bigquery(dim_product, "dim_product")
-        _load_to_bigquery(fact_sales,  "fact_sales")
+        succeeded = []
+        failed = []
+
+        try:
+            _load_to_bigquery_staging(dim_branch, "dim_branch")
+            succeeded.append("dim_branch_staging")
+            print(f"[LOAD] ✓ dim_branch_staging loaded successfully ({len(dim_branch)} rows)")
+        except Exception as e:
+            failed.append("dim_branch_staging")
+            print(f"[LOAD] ✗ dim_branch_staging FAILED: {e}")
+
+        try:
+            _load_to_bigquery_staging(dim_product, "dim_product")
+            succeeded.append("dim_product_staging")
+            print(f"[LOAD] ✓ dim_product_staging loaded successfully ({len(dim_product)} rows)")
+        except Exception as e:
+            failed.append("dim_product_staging")
+            print(f"[LOAD] ✗ dim_product_staging FAILED: {e}")
+
+        try:
+            _load_to_bigquery_staging(fact_sales, "fact_sales")
+            succeeded.append("fact_sales_staging")
+            print(f"[LOAD] ✓ fact_sales_staging loaded successfully ({len(fact_sales)} rows)")
+        except Exception as e:
+            failed.append("fact_sales_staging")
+            print(f"[LOAD] ✗ fact_sales_staging FAILED: {e}")
+
+        if not failed:
+            try:
+                _merge_dim_branch_and_product()
+                succeeded.extend(["dim_branch_merge", "dim_product_merge"])
+                print("[LOAD] ✓ dimension merges completed successfully")
+            except Exception as e:
+                failed.append("dimension_merges")
+                print(f"[LOAD] ✗ dimension_merges FAILED: {e}")
+
+        if not failed:
+            try:
+                _merge_fact_sales()
+                succeeded.append("fact_sales_merge")
+                print("[LOAD] ✓ fact_sales merge completed successfully")
+            except Exception as e:
+                failed.append("fact_sales_merge")
+                print(f"[LOAD] ✗ fact_sales_merge FAILED: {e}")
+
+        load_summary = {
+            "succeeded": succeeded,
+            "failed": failed,
+            "total": 6,
+        }
+        with open(OUTPUT_DIR / "load_summary.json", "w") as f:
+            json.dump(load_summary, f, indent=2)
+
+        print(f"[LOAD] Summary — succeeded: {succeeded}, failed: {failed}")
+
+        if failed:
+            raise RuntimeError(
+                f"Load stage incomplete — "
+                f"succeeded: {succeeded}, "
+                f"failed: {failed}. "
+                f"GCS upload skipped to avoid inconsistent state."
+            )
+
         _upload_to_gcs(dim_branch, dim_product, fact_sales)
 
     else:
         _load_to_sqlite(dim_branch, dim_product, fact_sales)
 
+        load_summary = {
+            "succeeded": ["dim_branch", "dim_product", "fact_sales"],
+            "failed": [],
+            "total": 3,
+        }
+        with open(OUTPUT_DIR / "load_summary.json", "w") as f:
+            json.dump(load_summary, f, indent=2)
+
+def _merge_fact_sales() -> None:
+    """
+    Merge fact_sales_staging into fact_sales in BigQuery.
+    Uses invoice_id as the transaction-level business key.
+    """
+    client = bigquery.Client(project=PROJECT_ID)
+
+    fact_merge_sql = f"""
+    MERGE `{PROJECT_ID}.{DATASET}.fact_sales` T
+    USING `{PROJECT_ID}.{DATASET}.fact_sales_staging` S
+    ON T.invoice_id = S.invoice_id
+    WHEN MATCHED THEN
+      UPDATE SET
+        T.branch_key = S.branch_key,
+        T.product_key = S.product_key,
+        T.sale_date = S.sale_date,
+        T.sale_time = S.sale_time,
+        T.customer_type = S.customer_type,
+        T.gender = S.gender,
+        T.payment_method = S.payment_method,
+        T.unit_price = S.unit_price,
+        T.quantity = S.quantity,
+        T.tax_amount = S.tax_amount,
+        T.total_amount = S.total_amount,
+        T.cogs = S.cogs,
+        T.gross_margin_pct = S.gross_margin_pct,
+        T.gross_income = S.gross_income,
+        T.rating = S.rating
+    WHEN NOT MATCHED THEN
+      INSERT (
+        sales_key,
+        invoice_id,
+        branch_key,
+        product_key,
+        sale_date,
+        sale_time,
+        customer_type,
+        gender,
+        payment_method,
+        unit_price,
+        quantity,
+        tax_amount,
+        total_amount,
+        cogs,
+        gross_margin_pct,
+        gross_income,
+        rating
+      )
+      VALUES (
+        S.sales_key,
+        S.invoice_id,
+        S.branch_key,
+        S.product_key,
+        S.sale_date,
+        S.sale_time,
+        S.customer_type,
+        S.gender,
+        S.payment_method,
+        S.unit_price,
+        S.quantity,
+        S.tax_amount,
+        S.total_amount,
+        S.cogs,
+        S.gross_margin_pct,
+        S.gross_income,
+        S.rating
+      )
+    """
+
+    client.query(fact_merge_sql).result()
+    print("Merged fact_sales_staging into fact_sales")
 
 def _upload_to_gcs(dim_branch, dim_product, fact_sales):
     """Uploads dimension and fact tables as CSVs to a Google Cloud Storage bucket."""
@@ -351,24 +490,6 @@ def _upload_to_gcs(dim_branch, dim_product, fact_sales):
         blob = bucket.blob(f"{name}.csv")
         blob.upload_from_string(df.to_csv(index=False), content_type="text/csv")
         print(f"Uploaded {name}.csv to gs://{BUCKET}/")
-
-
-def _load_to_bigquery(df: pd.DataFrame, table_name: str) -> None:
-    """Load a DataFrame directly into a BigQuery production table.
-
-    Uses WRITE_TRUNCATE — all existing data is replaced on every call.
-
-    Args:
-        df (pd.DataFrame): DataFrame to load into BigQuery.
-        table_name (str):  Unqualified table name (e.g. ``"dim_branch"``).
-    """
-    client     = bigquery.Client(project=PROJECT_ID)
-    table_id   = f"{PROJECT_ID}.{DATASET}.{table_name}"
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-    job        = client.load_table_from_dataframe(df, table_id, job_config=job_config)
-    job.result()
-    print(f"[LOAD] Loaded {len(df)} rows into {table_id}")
-
 
 def _load_to_sqlite(dim_branch, dim_product, fact_sales):
     """
@@ -424,6 +545,60 @@ def _load_to_sqlite(dim_branch, dim_product, fact_sales):
     conn.close()
     print(f"SQLite database saved to {db_path}")
 
+def _load_to_bigquery_staging(df: pd.DataFrame, table_name: str) -> None:
+    """
+    Load a dataframe into a BigQuery staging table.
+
+    Args:
+        df: DataFrame to load.
+        table_name: Base table name, such as dim_branch, dim_product, or fact_sales.
+    """
+    client = bigquery.Client(project=PROJECT_ID)
+    staging_table_id = f"{PROJECT_ID}.{DATASET}.{table_name}_staging"
+
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+    job = client.load_table_from_dataframe(df, staging_table_id, job_config=job_config)
+    job.result()
+
+    print(f"Loaded {len(df)} rows into staging table {staging_table_id}")
+
+
+def _merge_dim_branch_and_product() -> None:
+    """
+    Merge dimension staging tables into dimension target tables in BigQuery.
+    Inserts new rows and updates existing rows based on business keys.
+    """
+    client = bigquery.Client(project=PROJECT_ID)
+
+    dim_branch_merge_sql = f"""
+    MERGE `{PROJECT_ID}.{DATASET}.dim_branch` T
+    USING `{PROJECT_ID}.{DATASET}.dim_branch_staging` S
+    ON T.branch_code = S.branch_code
+    WHEN MATCHED THEN
+      UPDATE SET
+        T.city = S.city
+    WHEN NOT MATCHED THEN
+      INSERT (branch_key, branch_code, city)
+      VALUES (S.branch_key, S.branch_code, S.city)
+    """
+
+    dim_product_merge_sql = f"""
+    MERGE `{PROJECT_ID}.{DATASET}.dim_product` T
+    USING `{PROJECT_ID}.{DATASET}.dim_product_staging` S
+    ON T.product_line = S.product_line
+    WHEN MATCHED THEN
+      UPDATE SET
+        T.product_line = S.product_line
+    WHEN NOT MATCHED THEN
+      INSERT (product_key, product_line)
+      VALUES (S.product_key, S.product_line)
+    """
+
+    client.query(dim_branch_merge_sql).result()
+    print("Merged dim_branch_staging into dim_branch")
+
+    client.query(dim_product_merge_sql).result()
+    print("Merged dim_product_staging into dim_product")
 
 # ── Step 6: Report ─────────────────────────────────────────────────
 def generate_report():
