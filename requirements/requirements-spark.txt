@@ -1,0 +1,4 @@
+pyspark
+kagglehub
+pandas
+openpyxl

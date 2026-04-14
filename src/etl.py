@@ -1,21 +1,34 @@
 import os
 import json
-
+import threading
 import sqlite3
 from pathlib import Path
 
 import pandas as pd
 import kagglehub
-
+from flask import Flask
+import requests
 
 pd.set_option('display.max_columns', None)
 pd.set_option('display.float_format', '{:.2f}'.format)
 
+app = Flask(__name__)
 
 # ── Config ─────────────────────────────────────────────────────────
 DATASET_ID = "lovishbansal123/sales-of-a-supermarket"
 OUTPUT_DIR = Path("./output_data")
 OUTPUT_DIR.mkdir(exist_ok=True)
+PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "etl-pipeline-492723")
+DATASET    = "etlpipeline_dw"
+BUCKET     = "etl-pipeline-492723-supermarket-raw"
+
+# Detect environment
+IS_GCP = os.environ.get("GCP_PROJECT_ID") is not None
+print(f"Running in {'GCP' if IS_GCP else 'LOCAL'} mode")
+
+# GCP imports only when running on GCP
+if IS_GCP:
+    from google.cloud import bigquery, storage, secretmanager
 
 # ── Validation Constants ───────────────────────────────────────────
 REQUIRED_COLUMNS = [
@@ -224,6 +237,11 @@ def extract_data() -> pd.DataFrame:
     Raises:
         FileNotFoundError: If no CSV is found in the downloaded Kaggle bundle.
     """
+    if IS_GCP:
+        client = secretmanager.SecretManagerServiceClient()
+        name = f"projects/{PROJECT_ID}/secrets/kaggle-api-token/versions/latest"
+        response = client.access_secret_version(request={"name": name})
+        os.environ["KAGGLE_API_TOKEN"] = response.payload.data.decode("UTF-8")
 
     dataset_dir = kagglehub.dataset_download(DATASET_ID)
     csv_files = []
@@ -297,18 +315,64 @@ def load_data(
     dim_product: pd.DataFrame,
     fact_sales: pd.DataFrame,
 ) -> None:
-    """Load transformed tables into SQLite local data warehouse.
+    """Route transformed tables to the appropriate storage backend.
+
+    In GCP mode, loads each table to BigQuery staging, merges into final
+    warehouse tables, then uploads CSV copies to Cloud Storage only if all
+    BigQuery steps succeeded. In local mode, writes all tables to SQLite.
 
     Args:
-        dim_branch (pd.DataFrame):  Branch dimension table.
-        dim_product (pd.DataFrame): Product dimension table.
-        fact_sales (pd.DataFrame):  Fact sales table.
+        dim_branch: Branch dimension table.
+        dim_product: Product dimension table.
+        fact_sales: Fact sales table.
+
+    Raises:
+        RuntimeError: If one or more staging or merge steps fail.
     """
-    _load_to_sqlite(dim_branch, dim_product, fact_sales)
+    if IS_GCP:
+        _load_to_bigquery(dim_branch,  "dim_branch")
+        _load_to_bigquery(dim_product, "dim_product")
+        _load_to_bigquery(fact_sales,  "fact_sales")
+        _upload_to_gcs(dim_branch, dim_product, fact_sales)
+
+    else:
+        _load_to_sqlite(dim_branch, dim_product, fact_sales)
+
+
+def _upload_to_gcs(dim_branch, dim_product, fact_sales):
+    """Uploads dimension and fact tables as CSVs to a Google Cloud Storage bucket."""
+    client = storage.Client(project=PROJECT_ID)
+    bucket = client.bucket(BUCKET)
+    for name, df in [
+        ("dim_branch",  dim_branch),
+        ("dim_product", dim_product),
+        ("fact_sales",  fact_sales)
+    ]:
+        blob = bucket.blob(f"{name}.csv")
+        blob.upload_from_string(df.to_csv(index=False), content_type="text/csv")
+        print(f"Uploaded {name}.csv to gs://{BUCKET}/")
+
+
+def _load_to_bigquery(df: pd.DataFrame, table_name: str) -> None:
+    """Load a DataFrame directly into a BigQuery production table.
+
+    Uses WRITE_TRUNCATE — all existing data is replaced on every call.
+
+    Args:
+        df (pd.DataFrame): DataFrame to load into BigQuery.
+        table_name (str):  Unqualified table name (e.g. ``"dim_branch"``).
+    """
+    client     = bigquery.Client(project=PROJECT_ID)
+    table_id   = f"{PROJECT_ID}.{DATASET}.{table_name}"
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+    job        = client.load_table_from_dataframe(df, table_id, job_config=job_config)
+    job.result()
+    print(f"[LOAD] Loaded {len(df)} rows into {table_id}")
+
 
 def _load_to_sqlite(dim_branch, dim_product, fact_sales):
     """
-    Creates a local SQLite database with proper schema definitions and
+    Creates a local SQLite database with proper schema definitions and 
     Foreign Key relationships, then populates it.
     """
     db_path = OUTPUT_DIR / "supermarket_dw.sqlite"
@@ -320,9 +384,9 @@ def _load_to_sqlite(dim_branch, dim_product, fact_sales):
 
     conn.execute("""
     CREATE TABLE dim_branch (
-        branch_key INTEGER PRIMARY KEY,
-        branch_code TEXT,
-        city TEXT
+    branch_key INTEGER PRIMARY KEY,
+    branch_code TEXT,
+    city TEXT
     )""")
 
     conn.execute("""
@@ -354,11 +418,12 @@ def _load_to_sqlite(dim_branch, dim_product, fact_sales):
         FOREIGN KEY (product_key) REFERENCES dim_product(product_key)
     )""")
 
-    dim_branch.to_sql("dim_branch", conn, if_exists="append", index=False)
+    dim_branch.to_sql("dim_branch",   conn, if_exists="append", index=False)
     dim_product.to_sql("dim_product", conn, if_exists="append", index=False)
-    fact_sales.to_sql("fact_sales", conn, if_exists="append", index=False)
+    fact_sales.to_sql("fact_sales",   conn, if_exists="append", index=False)
     conn.close()
     print(f"SQLite database saved to {db_path}")
+
 
 # ── Step 6: Report ─────────────────────────────────────────────────
 def generate_report():
@@ -374,11 +439,11 @@ def generate_report():
         b.branch_code,
         b.city,
         p.product_line,
-        COUNT(f.sales_key)            AS transaction_count,
-        SUM(f.quantity)               AS total_units_sold,
+        COUNT(f.sales_key) AS transaction_count,
+        SUM(f.quantity) AS total_units_sold,
         ROUND(SUM(f.total_amount), 2) AS total_sales,
         ROUND(SUM(f.gross_income), 2) AS total_gross_income,
-        ROUND(AVG(f.rating), 2)       AS avg_rating,
+        ROUND(AVG(f.rating), 2) AS avg_rating,
         RANK() OVER (
             PARTITION BY b.branch_code
             ORDER BY SUM(f.total_amount) DESC
@@ -389,16 +454,24 @@ def generate_report():
             2
         ) AS pct_of_branch_sales
     FROM fact_sales f
-    JOIN dim_branch  b ON f.branch_key  = b.branch_key
+    JOIN dim_branch b ON f.branch_key = b.branch_key
     JOIN dim_product p ON f.product_key = p.product_key
     GROUP BY b.branch_code, b.city, p.product_line
     ORDER BY b.branch_code, sales_rank_within_branch, p.product_line
-"""
+    """
 
-    db_path   = OUTPUT_DIR / "supermarket_dw.sqlite"
-    conn      = sqlite3.connect(db_path)
-    report_df = pd.read_sql_query(query, conn)
-    conn.close()
+    if IS_GCP:
+        bq_query = query \
+            .replace("dim_branch",  f"`{PROJECT_ID}.{DATASET}.dim_branch`") \
+            .replace("dim_product", f"`{PROJECT_ID}.{DATASET}.dim_product`") \
+            .replace("fact_sales",  f"`{PROJECT_ID}.{DATASET}.fact_sales`")
+        client    = bigquery.Client(project=PROJECT_ID)
+        report_df = client.query(bq_query).to_dataframe()
+    else:
+        db_path   = OUTPUT_DIR / "supermarket_dw.sqlite"
+        conn      = sqlite3.connect(db_path)
+        report_df = pd.read_sql_query(query, conn)
+        conn.close()
 
     report_df.to_csv(OUTPUT_DIR / "report.csv", index=False)
     print(report_df.to_string())
@@ -406,15 +479,16 @@ def generate_report():
 
 # ── Main ETL ───────────────────────────────────────────────────────
 def run_etl():
-    """The main entry point for the ETL process.
-
-    Sequentially executes Extract, Transform, and Load steps,
+    """
+    The main entry point for the ETL process. 
+    Sequentially executes Extract, Transform, and Load steps, 
     then triggers the final analytical report.
     """
     try:
         df_raw = extract_data()
         dim_branch, dim_product, fact_sales, dq_report = transform_data(df_raw)
 
+        # Save CSVs locally always
         dim_branch.to_csv(OUTPUT_DIR  / "dim_branch.csv",  index=False)
         dim_product.to_csv(OUTPUT_DIR / "dim_product.csv", index=False)
         fact_sales.to_csv(OUTPUT_DIR  / "fact_sales.csv",  index=False)
@@ -427,9 +501,30 @@ def run_etl():
         print(report_df.head().to_string())
 
     except Exception as e:
-        print(f"ETL pipeline failed: {str(e)}")
+        error_msg = f"ETL pipeline failed in project {PROJECT_ID}: {str(e)}"
+        print(error_msg)
         raise
+
+# ── Flask Routes ───────────────────────────────────────────────────
+@app.route("/", methods=["GET"])
+def health():
+    """Simple health check endpoint."""
+    return "ETL Service is running!", 200
+
+@app.route("/run", methods=["POST"])
+def trigger_etl():
+    """
+    Endpoint to trigger the ETL process asynchronously via a thread.
+    Useful for triggering via a webhook or Cloud Scheduler.
+    """
+    thread = threading.Thread(target=run_etl)
+    thread.start()
+    return "ETL pipeline triggered!", 200
 
 # ── Entry Point ────────────────────────────────────────────────────
 if __name__ == "__main__":
-    run_etl()
+    if IS_GCP:
+        port = int(os.environ.get("PORT", 8080))
+        app.run(host="0.0.0.0", port=port)
+    else:
+        run_etl()
