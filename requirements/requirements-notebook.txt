@@ -1,0 +1,22 @@
+# Core data processing
+pandas
+numpy
+
+# Kaggle data extraction
+kagglehub
+
+# Database
+sqlalchemy
+
+# Visualization
+matplotlib
+seaborn
+
+# Jupyter notebook environment
+jupyter
+ipykernel
+ipywidgets
+nbconvert
+
+# Excel support
+openpyxl

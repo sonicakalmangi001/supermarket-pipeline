@@ -1,0 +1,12 @@
+pandas
+kagglehub
+openpyxl
+gunicorn
+flask
+sqlalchemy
+google-cloud-bigquery
+google-cloud-storage
+google-cloud-secret-manager
+db-dtypes
+pyarrow
+

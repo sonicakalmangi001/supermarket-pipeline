@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.sqlite
+*.db
+*.csv
+.env
+.DS_Store
+venv/
+.ipynb_checkpoints/
+output_data/
+derby.log
+metastore_db/
+spark_output/
+supermarket_sales.db
+etl-alert-policy.json
+.gcloudignore
