@@ -52,7 +52,7 @@ fi
 
 # Check load_summary.json exists in Cloud Storage
 echo "Checking load_summary.json..."
-if gsutil ls gs://etl-pipeline-492723-supermarket-raw/load_summary.json > /dev/null 2>&1; then
+if gsutil ls gs://etl-pipeline-492723-etlpipeline-raw/load_summary.json > /dev/null 2>&1; then
     echo "PASS load_summary.json exists in Cloud Storage"
 else
     echo "FAIL load_summary.json not found"

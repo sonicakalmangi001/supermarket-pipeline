@@ -20,7 +20,7 @@ OUTPUT_DIR = Path("./output_data")
 OUTPUT_DIR.mkdir(exist_ok=True)
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "etl-pipeline-492723")
 DATASET    = "etlpipeline_dw"
-BUCKET     = "etl-pipeline-492723-supermarket-raw"
+BUCKET     = "etl-pipeline-492723-etlpipeline-raw"
 
 # Detect environment
 IS_GCP = os.environ.get("GCP_PROJECT_ID") is not None
