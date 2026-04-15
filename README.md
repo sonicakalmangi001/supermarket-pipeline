@@ -39,7 +39,7 @@ supermarket-pipeline/
 │ └── report.sql        # Analytical report query
 │
 ├── tests/ # All tests
-│ ├── _init_.py
+│ ├── __init__.py
 │ ├── test_etl.py # Unit tests (pytest)
 │ └── smoke_test_gcp.sh # GCP post-deployment smoke tests
 │
