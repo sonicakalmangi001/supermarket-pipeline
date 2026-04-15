@@ -27,7 +27,8 @@
 | BigQuery | `dim_branch`, `dim_product`, `fact_sales`, `vw_sales_report` | Active |
 | Cloud Scheduler | `supermarket-daily-run` | Active |
 | Secret Manager | `kaggle-api-token` | Active |
-| Looker Studio | Connected to `vw_sales_report` | Active |
+| Looker Studio    | Connected to `vw_sales_report`        | Active |
+| Cloud Monitoring | Log-based alert on pipeline failure   | Active |
 
 ---
 
@@ -338,7 +339,7 @@ gcloud logging read \
 gcloud beta monitoring channels create \
   --display-name="ETL Email Alert" \
   --type=email \
-  --channel-labels=email_address=ksonica99@gmail.com
+  --channel-labels=email_address=YOUR_EMAIL@gmail.com
 ```
 
 ### Step 2 — Get channel ID
@@ -425,7 +426,7 @@ gcloud logging read \
   --freshness=10m \
   --format="value(textPayload)"
 
-# 3 — Check ksonica99@gmail.com
+# 3 — Check your configured email inbox
 # Email arrives within 2–5 minutes
 ```
 
