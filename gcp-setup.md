@@ -106,10 +106,10 @@ tests/test_etl.py::test_dim_branch_row_count PASSED
 tests/test_etl.py::test_dim_product_row_count PASSED
 tests/test_etl.py::test_fact_sales_row_count PASSED
 ...
-17 passed
+19 passed
 ```
 
-All 17 tests must pass before redeploying.
+All 19 tests must pass before redeploying.
 
 ---
 
@@ -272,6 +272,8 @@ Look for:
 
 - URL: lookerstudio.google.com
 - Data source: `etl-pipeline-492723` → `etlpipeline_dw` → `vw_sales_report`
+- Total Revenue scorecard connects to `fact_sales` → `SUM(total_amount)`
+- Sales Performance table connects to `vw_sales_report` → shows RANK() and pct_of_branch_sales
 
 ---
 
