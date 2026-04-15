@@ -12,3 +12,4 @@
 - Added staging swap pattern for partial load prevention
 - Added load_summary.json output on every pipeline run
 - Added Cloud Monitoring log-based email alerts on pipeline failure
+- Added unit tests for load_summary.json validation (19 tests total)

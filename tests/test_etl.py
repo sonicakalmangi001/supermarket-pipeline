@@ -3,6 +3,8 @@ import sqlite3
 import pandas as pd
 import os
 import sys
+import json
+from pathlib import Path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 
@@ -250,3 +252,85 @@ def test_valid_payment_methods(sample_df):
     valid = {"Cash", "Credit card", "Ewallet"}
     invalid = sample_df[~sample_df["payment_method"].isin(valid)]
     assert len(invalid) == 0
+
+def test_load_summary_created(sample_df):
+    """load_summary.json must be created after local load."""
+    from src.etl import OUTPUT_DIR, load_data
+
+    dim_branch = (
+        sample_df[["branch", "city"]]
+        .drop_duplicates()
+        .reset_index(drop=True)
+        .rename(columns={"branch": "branch_code"})
+    )
+    dim_branch["branch_key"] = dim_branch.index + 1
+    dim_branch = dim_branch[["branch_key", "branch_code", "city"]]
+
+    dim_product = (
+        sample_df[["product_line"]]
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
+    dim_product["product_key"] = dim_product.index + 1
+    dim_product = dim_product[["product_key", "product_line"]]
+
+    fact_sales = sample_df.merge(
+        dim_branch.rename(columns={"branch_code": "branch"}),
+        on=["branch", "city"], how="left"
+    ).merge(dim_product, on="product_line", how="left")
+    fact_sales = fact_sales[[
+        "invoice_id", "branch_key", "product_key", "sale_date", "sale_time",
+        "customer_type", "gender", "payment_method", "unit_price", "quantity",
+        "tax_amount", "total_amount", "cogs", "gross_margin_pct",
+        "gross_income", "rating"
+    ]].copy()
+    fact_sales.insert(0, "sales_key", range(1, len(fact_sales) + 1))
+
+    load_data(dim_branch, dim_product, fact_sales)
+
+    assert (OUTPUT_DIR / "load_summary.json").exists(), \
+        "load_summary.json was not created"
+
+
+def test_load_summary_no_failures(sample_df):
+    """load_summary.json must show no failed tables on clean local run."""
+    from src.etl import OUTPUT_DIR, load_data
+
+    dim_branch = (
+        sample_df[["branch", "city"]]
+        .drop_duplicates()
+        .reset_index(drop=True)
+        .rename(columns={"branch": "branch_code"})
+    )
+    dim_branch["branch_key"] = dim_branch.index + 1
+    dim_branch = dim_branch[["branch_key", "branch_code", "city"]]
+
+    dim_product = (
+        sample_df[["product_line"]]
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
+    dim_product["product_key"] = dim_product.index + 1
+    dim_product = dim_product[["product_key", "product_line"]]
+
+    fact_sales = sample_df.merge(
+        dim_branch.rename(columns={"branch_code": "branch"}),
+        on=["branch", "city"], how="left"
+    ).merge(dim_product, on="product_line", how="left")
+    fact_sales = fact_sales[[
+        "invoice_id", "branch_key", "product_key", "sale_date", "sale_time",
+        "customer_type", "gender", "payment_method", "unit_price", "quantity",
+        "tax_amount", "total_amount", "cogs", "gross_margin_pct",
+        "gross_income", "rating"
+    ]].copy()
+    fact_sales.insert(0, "sales_key", range(1, len(fact_sales) + 1))
+
+    load_data(dim_branch, dim_product, fact_sales)
+
+    with open(OUTPUT_DIR / "load_summary.json") as f:
+        summary = json.load(f)
+
+    assert summary["failed"] == [], \
+        f"Expected no failures but got: {summary['failed']}"
+    assert len(summary["succeeded"]) == 3, \
+        f"Expected 3 succeeded but got: {summary['succeeded']}"

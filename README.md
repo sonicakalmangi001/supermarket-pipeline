@@ -10,7 +10,7 @@ Full release history is available on the [Releases page](https://github.com/soni
 
 | Version | What was added |
 |---|---|
-| [v1.0.0](https://github.com/sonicakalmangi001/supermarket-pipeline/releases/tag/v1.0.0) | Initial ETL pipeline with pandas, SQLite, data quality checks, star schema, 17 unit tests |
+| [v1.0.0](https://github.com/sonicakalmangi001/supermarket-pipeline/releases/tag/v1.0.0) | Initial ETL pipeline with pandas, SQLite, data quality checks, star schema, 19 unit tests |
 | [v1.1.0](https://github.com/sonicakalmangi001/supermarket-pipeline/releases/tag/v1.1.0) | GCP Cloud Run deployment, BigQuery integration, Secret Manager, Cloud Scheduler |
 | [v1.2.0](https://github.com/sonicakalmangi001/supermarket-pipeline/releases/tag/v1.2.0) | Staging swap pattern for partial load prevention, load_summary.json, Cloud Monitoring alerts |
 
@@ -260,8 +260,10 @@ tests/test_etl.py::test_valid_cities PASSED
 tests/test_etl.py::test_valid_customer_types PASSED
 tests/test_etl.py::test_valid_genders PASSED
 tests/test_etl.py::test_valid_payment_methods PASSED
+tests/test_etl.py::test_load_summary_created PASSED
+tests/test_etl.py::test_load_summary_no_failures PASSED 
 
-17 passed
+19 passed
 ```
 
 ---
@@ -311,10 +313,10 @@ All GCP smoke tests passed!
 ## Testing Strategy
 
 
-| Test Type       | Tool      | Where       | What it validates                                                       |
-| --------------- | --------- | ----------- | ------------------------------------------------------------------------|
-| Unit tests      | pytest    | Local Mac   | ETL logic, transforms, data quality rules, SQLite loading, load summary |
-| GCP smoke tests | bash + bq | Cloud Shell | BigQuery row counts, Cloud Storage file existence                       |
+| Test Type       | Tool      | Where       | What it validates                                                             |
+| --------------- | --------- | ----------- | ------------------------------------------------------------------------------|
+| Unit tests | pytest | Local Mac | ETL logic, transforms, data quality rules, SQLite loading, load_summary.json validation |
+| GCP smoke tests | bash + bq | Cloud Shell | BigQuery row counts, Cloud Storage file existence                             |
 
 
 ---
