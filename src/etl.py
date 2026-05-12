@@ -48,38 +48,71 @@ PRICE_MIN              = 0.0
 TOLERANCE              = 0.02
 
 # ── Step 1: Standardize Columns ────────────────────────────────────
-def to_snake_case(name: str) -> str:
+class ColumnStandardizer:
     """
-    Converts a column name into snake_case.
+    Handles standardization of raw dataset column names.
+
+    This class encapsulates the logic for transforming arbitrary column
+    headers into a consistent, database‑friendly snake_case schema.
+    It supports:
+      1. A generic snake_case conversion for any column name.
+      2. Optional alias overrides for business‑friendly names
+         (e.g. "Tax 5%" -> "tax_amount").
+
+    This makes the renaming behavior reusable across datasets and easy to
+    configure without changing call‑site code.
     """
-    name = name.strip().lower()
-    name = re.sub(r"[^a-z0-9]+", "_", name)
-    return re.sub(r"_+", "_", name).strip("_")
 
+    def __init__(self, alias_map: dict[str, str] | None = None) -> None:
+        """
+        Initialize a ColumnStandardizer.
 
-def standardize_columns(
-    df: pd.DataFrame,
-    alias_map: dict[str, str] | None = None
-) -> pd.DataFrame:
-    """
-    Standardizes dataframe column names.
+        Args:
+            alias_map: Optional mapping from raw column names to explicitly
+                desired output names. If a column exists in this map, the
+                mapped value is used; otherwise a snake_case name is generated.
+        """
+        self.alias_map = alias_map or {}
 
-    Logic:
-    1. If a column exists in alias_map, use that mapped value.
-    2. Otherwise, convert the column name to snake_case.
+    def to_snake_case(self, name: str) -> str:
+        """
+        Convert an arbitrary column name into snake_case.
 
-    Args:
-        df (pd.DataFrame): Input dataframe.
-        alias_map (dict[str, str] | None): Optional custom overrides.
+        Example:
+            "Invoice ID"   -> "invoice_id"
+            "Gross income" -> "gross_income"
+            "Tax 5%"       -> "tax_5"
+        """
+        name = name.strip().lower()
+        name = re.sub(r"[^a-z0-9]+", "_", name)
+        return re.sub(r"_+", "_", name).strip("_")
 
-    Returns:
-        pd.DataFrame: Dataframe with standardized column names.
-    """
-    alias_map = alias_map or {}
+    def standardize(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Standardize all column names in the given DataFrame.
 
-    return df.rename(
-        columns=lambda col: alias_map.get(col, to_snake_case(col))
-    )
+        For each column name:
+          * If it appears in alias_map, use the mapped value.
+          * Otherwise, generate a snake_case name via to_snake_case().
+
+        Args:
+            df: Input DataFrame whose columns should be standardized.
+
+        Returns:
+            A new DataFrame with standardized column names; data is unchanged.
+        """
+        return df.rename(
+            columns=lambda col: self.alias_map.get(col, self.to_snake_case(col))
+        )
+
+# Shared column standardizer for this pipeline.
+# Alias map preserves business‑friendly names that differ from naive snake_case.
+standardizer = ColumnStandardizer(
+    alias_map={
+        "Tax 5%":                  "tax_amount",
+        "gross margin percentage": "gross_margin_pct",
+    }
+)
 
 # ── Step 2: Data Quality Checks ────────────────────────────────────
 def run_quality_checks(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -275,13 +308,8 @@ def transform_data(df_raw: pd.DataFrame):
         tuple: (dim_branch, dim_product, fact_sales, dq_report)
     """
     df_clean, dq_report = run_quality_checks(df_raw)
-    df = standardize_columns(
-    df_clean,
-    alias_map={
-        "Tax 5%": "tax_amount",
-        "gross margin percentage": "gross_margin_pct",
-    }
-    )
+    # Use the shared ColumnStandardizer instance to standardize columns.
+    df = standardizer.standardize(df_clean)
     df["sale_date"] = pd.to_datetime(df["sale_date"])
 
     dim_branch = (
