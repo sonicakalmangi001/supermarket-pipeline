@@ -105,160 +105,235 @@ class ColumnStandardizer:
             columns=lambda col: self.alias_map.get(col, self.to_snake_case(col))
         )
 
-# Shared column standardizer for this pipeline.
-# Alias map preserves business‑friendly names that differ from naive snake_case.
+# ── Step 2: Data Quality Checks ────────────────────────────────────
+class DataQualityChecker:
+    """
+    Performs data quality validation and cleaning on the raw supermarket dataset.
+
+    This class encapsulates the logic currently implemented in run_quality_checks:
+      * Schema validation (required columns, extra columns).
+      * Null checks on critical fields.
+      * Categorical membership checks (branch, city, etc.).
+      * Numeric range checks (rating, quantity, price).
+      * Financial consistency checks (tax, totals, cogs, gross income).
+      * Row‑level reject mask and reporting.
+
+    The main entry point is `run(df_raw)`, which returns a cleaned DataFrame
+    and a detailed report dictionary.
+    """
+
+    def __init__(
+        self,
+        required_columns: list[str],
+        allowed_branches: set[str],
+        allowed_cities: set[str],
+        allowed_customer_types: set[str],
+        allowed_genders: set[str],
+        allowed_payments: set[str],
+        rating_min: float,
+        rating_max: float,
+        quantity_min: int,
+        price_min: float,
+        tolerance: float,
+        output_dir: Path,
+    ) -> None:
+        """
+        Initialize the DataQualityChecker with all rule parameters.
+
+        Args:
+            required_columns: Columns that must be present in the raw data.
+            allowed_branches: Valid branch codes.
+            allowed_cities: Valid city names.
+            allowed_customer_types: Valid customer type categories.
+            allowed_genders: Valid gender categories.
+            allowed_payments: Valid payment method categories.
+            rating_min: Minimum allowed rating.
+            rating_max: Maximum allowed rating.
+            quantity_min: Minimum allowed quantity.
+            price_min: Minimum allowed unit price.
+            tolerance: Allowed tolerance when comparing recalculated financials.
+            output_dir: Directory where data quality artifacts are written.
+        """
+        self.required_columns = required_columns
+        self.allowed_branches = allowed_branches
+        self.allowed_cities = allowed_cities
+        self.allowed_customer_types = allowed_customer_types
+        self.allowed_genders = allowed_genders
+        self.allowed_payments = allowed_payments
+        self.rating_min = rating_min
+        self.rating_max = rating_max
+        self.quantity_min = quantity_min
+        self.price_min = price_min
+        self.tolerance = tolerance
+        self.output_dir = output_dir
+
+    def run(self, df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+        """
+        Execute the full data quality pipeline on the raw input data.
+
+        Args:
+            df_raw: Raw supermarket sales DataFrame as loaded from source.
+
+        Returns:
+            A tuple of:
+                clean_df: Cleaned DataFrame containing only valid, deduplicated records.
+                report:   Dict with errors, warnings, and metrics about data quality.
+        """
+        report: dict = {"errors": [], "warnings": [], "metrics": {}}
+
+        # 1) Schema checks
+        missing_columns = [c for c in self.required_columns if c not in df_raw.columns]
+        extra_columns = [c for c in df_raw.columns if c not in self.required_columns]
+
+        if missing_columns:
+            raise ValueError(f"Missing required columns: {missing_columns}")
+
+        if extra_columns:
+            report["warnings"].append({"type": "extra_columns", "columns": extra_columns})
+
+        report["metrics"]["raw_row_count"] = int(len(df_raw))
+        report["metrics"]["raw_duplicate_rows"] = int(df_raw.duplicated().sum())
+        report["metrics"]["duplicate_invoice_ids"] = int(df_raw["Invoice ID"].duplicated().sum())
+
+        null_counts = df_raw[self.required_columns].isna().sum().to_dict()
+        report["metrics"]["null_counts"] = {k: int(v) for k, v in null_counts.items()}
+
+        critical_null_cols = [
+            "Invoice ID", "Branch", "City", "Product line",
+            "Unit price", "Quantity", "Total", "Date", "Time",
+        ]
+        critical_null_rows = df_raw[critical_null_cols].isna().any(axis=1)
+        report["metrics"]["critical_null_rows"] = int(critical_null_rows.sum())
+
+        # 2) Type conversions
+        df = df_raw.copy()
+        df["Date"] = pd.to_datetime(df["Date"], format="%m/%d/%Y", errors="coerce")
+        df["Time"] = pd.to_datetime(df["Time"], format="%H:%M", errors="coerce").dt.time
+
+        numeric_cols = ["Unit price", "Quantity", "Tax 5%", "Total", "cogs", "gross income", "Rating"]
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # 3) Invalid date/time and categorical values
+        invalid_date_rows = df["Date"].isna()
+        invalid_time_rows = df["Time"].isna()
+        report["metrics"]["invalid_dates"] = int(invalid_date_rows.sum())
+        report["metrics"]["invalid_times"] = int(invalid_time_rows.sum())
+
+        invalid_branch = ~df["Branch"].isin(self.allowed_branches)
+        invalid_city = ~df["City"].isin(self.allowed_cities)
+        invalid_customer_type = ~df["Customer type"].isin(self.allowed_customer_types)
+        invalid_gender = ~df["Gender"].isin(self.allowed_genders)
+        invalid_payment = ~df["Payment"].isin(self.allowed_payments)
+
+        report["metrics"]["invalid_branch_values"] = int(invalid_branch.sum())
+        report["metrics"]["invalid_city_values"] = int(invalid_city.sum())
+        report["metrics"]["invalid_customer_type_values"] = int(invalid_customer_type.sum())
+        report["metrics"]["invalid_gender_values"] = int(invalid_gender.sum())
+        report["metrics"]["invalid_payment_values"] = int(invalid_payment.sum())
+
+        # 4) Numeric business rules
+        invalid_numeric = (
+            (df["Unit price"] <= self.price_min) |
+            (df["Quantity"] < self.quantity_min) |
+            (df["Rating"] < self.rating_min) |
+            (df["Rating"] > self.rating_max)
+        )
+        report["metrics"]["invalid_numeric_rows"] = int(invalid_numeric.fillna(True).sum())
+
+        # 5) Financial consistency checks
+        calc_tax = (df["cogs"] * 0.05).round(2)
+        calc_total = (df["cogs"] + df["Tax 5%"].fillna(0)).round(2)
+        calc_line = (df["Unit price"] * df["Quantity"]).round(2)
+
+        tax_mismatch = (df["Tax 5%"] - calc_tax).abs() > self.tolerance
+        total_mismatch = (df["Total"] - calc_total).abs() > self.tolerance
+        cogs_mismatch = (df["cogs"] - calc_line).abs() > self.tolerance
+        gross_income_mismatch = (df["gross income"] - df["Tax 5%"].fillna(0)).abs() > self.tolerance
+
+        report["metrics"]["tax_mismatch_rows"] = int(tax_mismatch.fillna(False).sum())
+        report["metrics"]["total_mismatch_rows"] = int(total_mismatch.fillna(False).sum())
+        report["metrics"]["cogs_mismatch_rows"] = int(cogs_mismatch.fillna(False).sum())
+        report["metrics"]["gross_income_mismatch_rows"] = int(gross_income_mismatch.fillna(False).sum())
+
+        # 6) Reject mask
+        reject_mask = (
+            critical_null_rows |
+            invalid_date_rows |
+            invalid_time_rows |
+            invalid_branch |
+            invalid_city |
+            invalid_customer_type |
+            invalid_gender |
+            invalid_payment |
+            invalid_numeric.fillna(True)
+        )
+
+        report["metrics"]["rejected_rows"] = int(reject_mask.sum())
+        report["metrics"]["clean_rows"] = int((~reject_mask).sum())
+
+        warn_checks = {
+            "duplicate_rows": report["metrics"]["raw_duplicate_rows"],
+            "duplicate_invoice_ids": report["metrics"]["duplicate_invoice_ids"],
+            "tax_mismatch_rows": report["metrics"]["tax_mismatch_rows"],
+            "total_mismatch_rows": report["metrics"]["total_mismatch_rows"],
+            "cogs_mismatch_rows": report["metrics"]["cogs_mismatch_rows"],
+            "gross_income_mismatch_rows": report["metrics"]["gross_income_mismatch_rows"],
+        }
+        for check_name, count in warn_checks.items():
+            if count > 0:
+                report["warnings"].append({"type": check_name, "count": int(count)})
+
+        # 7) Produce cleaned frame and artifacts
+        clean_df = df.loc[~reject_mask].copy()
+        clean_df = clean_df.drop_duplicates(subset=["Invoice ID"], keep="first")
+        report["metrics"]["clean_rows_after_invoice_dedup"] = int(len(clean_df))
+
+        reject_reasons = pd.DataFrame({
+            "invoice_id": df_raw["Invoice ID"],
+            "critical_null": critical_null_rows,
+            "invalid_date": invalid_date_rows,
+            "invalid_time": invalid_time_rows,
+            "invalid_branch": invalid_branch,
+            "invalid_city": invalid_city,
+            "invalid_customer_type": invalid_customer_type,
+            "invalid_gender": invalid_gender,
+            "invalid_payment": invalid_payment,
+            "invalid_numeric": invalid_numeric.fillna(True),
+            "tax_mismatch": tax_mismatch.fillna(False),
+            "total_mismatch": total_mismatch.fillna(False),
+            "cogs_mismatch": cogs_mismatch.fillna(False),
+            "gross_income_mismatch": gross_income_mismatch.fillna(False),
+            "rejected": reject_mask,
+        })
+        reject_reasons.to_csv(self.output_dir / "data_quality_rejects.csv", index=False)
+
+        with open(self.output_dir / "data_quality_report.json", "w") as f:
+            json.dump(report, f, indent=2, default=str)
+
+        return clean_df, report
+
 standardizer = ColumnStandardizer(
     alias_map={
-        "Tax 5%":                  "tax_amount",
+        "Tax 5%": "tax_amount",
         "gross margin percentage": "gross_margin_pct",
     }
 )
 
-# ── Step 2: Data Quality Checks ────────────────────────────────────
-def run_quality_checks(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """
-    Performs comprehensive data validation including schema checks, 
-    categorical membership, numeric ranges, and financial calculation integrity.
-
-    Logic:
-    1. Validates presence of all required columns.
-    2. Checks for nulls in critical fields (IDs, Prices, Dates).
-    3. Validates business rules (e.g., Rating must be 0-10).
-    4. Recalculates Tax, Total, and COGS to ensure mathematical consistency.
-    5. Flags rows for rejection if they fail critical checks.
-
-    Args:
-        df_raw (pd.DataFrame): The raw input data.
-
-    Returns:
-        tuple: (clean_df, report_dict)
-            - clean_df: Dataframe containing only valid, deduplicated records.
-            - report_dict: Summary metrics of the validation process.
-    """
-    report = {"errors": [], "warnings": [], "metrics": {}}
-
-    missing_columns = [c for c in REQUIRED_COLUMNS if c not in df_raw.columns]
-    extra_columns   = [c for c in df_raw.columns if c not in REQUIRED_COLUMNS]
-    if missing_columns:
-        raise ValueError(f"Missing required columns: {missing_columns}")
-    if extra_columns:
-        report["warnings"].append({"type": "extra_columns", "columns": extra_columns})
-
-    report["metrics"]["raw_row_count"]         = int(len(df_raw))
-    report["metrics"]["raw_duplicate_rows"]    = int(df_raw.duplicated().sum())
-    report["metrics"]["duplicate_invoice_ids"] = int(df_raw["Invoice ID"].duplicated().sum())
-
-    null_counts = df_raw[REQUIRED_COLUMNS].isna().sum().to_dict()
-    report["metrics"]["null_counts"] = {k: int(v) for k, v in null_counts.items()}
-
-    critical_null_cols = [
-        "Invoice ID", "Branch", "City", "Product line", "Unit price",
-        "Quantity", "Total", "Date", "Time"
-    ]
-    critical_null_rows = df_raw[critical_null_cols].isna().any(axis=1)
-    report["metrics"]["critical_null_rows"] = int(critical_null_rows.sum())
-
-    df = df_raw.copy()
-    df["Date"] = pd.to_datetime(df["Date"], format="%m/%d/%Y", errors="coerce")
-    df["Time"] = pd.to_datetime(df["Time"], format="%H:%M", errors="coerce").dt.time
-
-    numeric_cols = ["Unit price", "Quantity", "Tax 5%", "Total", "cogs", "gross income", "Rating"]
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    invalid_date_rows = df["Date"].isna()
-    invalid_time_rows = df["Time"].isna()
-    report["metrics"]["invalid_dates"] = int(invalid_date_rows.sum())
-    report["metrics"]["invalid_times"] = int(invalid_time_rows.sum())
-
-    invalid_branch        = ~df["Branch"].isin(ALLOWED_BRANCHES)
-    invalid_city          = ~df["City"].isin(ALLOWED_CITIES)
-    invalid_customer_type = ~df["Customer type"].isin(ALLOWED_CUSTOMER_TYPES)
-    invalid_gender        = ~df["Gender"].isin(ALLOWED_GENDERS)
-    invalid_payment       = ~df["Payment"].isin(ALLOWED_PAYMENTS)
-
-    report["metrics"]["invalid_branch_values"]        = int(invalid_branch.sum())
-    report["metrics"]["invalid_city_values"]          = int(invalid_city.sum())
-    report["metrics"]["invalid_customer_type_values"] = int(invalid_customer_type.sum())
-    report["metrics"]["invalid_gender_values"]        = int(invalid_gender.sum())
-    report["metrics"]["invalid_payment_values"]       = int(invalid_payment.sum())
-
-    invalid_numeric = (
-        (df["Unit price"] <= PRICE_MIN) |
-        (df["Quantity"] < QUANTITY_MIN) |
-        (df["Rating"] < RATING_MIN) |
-        (df["Rating"] > RATING_MAX)
-    )
-    report["metrics"]["invalid_numeric_rows"] = int(invalid_numeric.fillna(True).sum())
-
-    calc_tax    = (df["cogs"] * 0.05).round(2)
-    calc_total  = (df["cogs"] + df["Tax 5%"].fillna(0)).round(2)
-    calc_line   = (df["Unit price"] * df["Quantity"]).round(2)
-
-    tax_mismatch          = (df["Tax 5%"] - calc_tax).abs() > TOLERANCE
-    total_mismatch        = (df["Total"] - calc_total).abs() > TOLERANCE
-    cogs_mismatch         = (df["cogs"] - calc_line).abs() > TOLERANCE
-    gross_income_mismatch = (df["gross income"] - df["Tax 5%"].fillna(0)).abs() > TOLERANCE
-
-    report["metrics"]["tax_mismatch_rows"]          = int(tax_mismatch.fillna(False).sum())
-    report["metrics"]["total_mismatch_rows"]        = int(total_mismatch.fillna(False).sum())
-    report["metrics"]["cogs_mismatch_rows"]         = int(cogs_mismatch.fillna(False).sum())
-    report["metrics"]["gross_income_mismatch_rows"] = int(gross_income_mismatch.fillna(False).sum())
-
-    reject_mask = (
-        critical_null_rows    |
-        invalid_date_rows     |
-        invalid_time_rows     |
-        invalid_branch        |
-        invalid_city          |
-        invalid_customer_type |
-        invalid_gender        |
-        invalid_payment       |
-        invalid_numeric.fillna(True)
-    )
-
-    report["metrics"]["rejected_rows"] = int(reject_mask.sum())
-    report["metrics"]["clean_rows"]    = int((~reject_mask).sum())
-
-    warn_checks = {
-        "duplicate_rows":             report["metrics"]["raw_duplicate_rows"],
-        "duplicate_invoice_ids":      report["metrics"]["duplicate_invoice_ids"],
-        "tax_mismatch_rows":          report["metrics"]["tax_mismatch_rows"],
-        "total_mismatch_rows":        report["metrics"]["total_mismatch_rows"],
-        "cogs_mismatch_rows":         report["metrics"]["cogs_mismatch_rows"],
-        "gross_income_mismatch_rows": report["metrics"]["gross_income_mismatch_rows"],
-    }
-    for check_name, count in warn_checks.items():
-        if count > 0:
-            report["warnings"].append({"type": check_name, "count": int(count)})
-
-    clean_df = df.loc[~reject_mask].copy()
-    clean_df = clean_df.drop_duplicates(subset=["Invoice ID"], keep="first")
-    report["metrics"]["clean_rows_after_invoice_dedup"] = int(len(clean_df))
-
-    reject_reasons = pd.DataFrame({
-        "invoice_id":            df_raw["Invoice ID"],
-        "critical_null":         critical_null_rows,
-        "invalid_date":          invalid_date_rows,
-        "invalid_time":          invalid_time_rows,
-        "invalid_branch":        invalid_branch,
-        "invalid_city":          invalid_city,
-        "invalid_customer_type": invalid_customer_type,
-        "invalid_gender":        invalid_gender,
-        "invalid_payment":       invalid_payment,
-        "invalid_numeric":       invalid_numeric.fillna(True),
-        "tax_mismatch":          tax_mismatch.fillna(False),
-        "total_mismatch":        total_mismatch.fillna(False),
-        "cogs_mismatch":         cogs_mismatch.fillna(False),
-        "gross_income_mismatch": gross_income_mismatch.fillna(False),
-        "rejected":              reject_mask,
-    })
-    reject_reasons.to_csv(OUTPUT_DIR / "data_quality_rejects.csv", index=False)
-
-    with open(OUTPUT_DIR / "data_quality_report.json", "w") as f:
-        json.dump(report, f, indent=2, default=str)
-
-    return clean_df, report
+dq_checker = DataQualityChecker(
+    required_columns=REQUIRED_COLUMNS,
+    allowed_branches=ALLOWED_BRANCHES,
+    allowed_cities=ALLOWED_CITIES,
+    allowed_customer_types=ALLOWED_CUSTOMER_TYPES,
+    allowed_genders=ALLOWED_GENDERS,
+    allowed_payments=ALLOWED_PAYMENTS,
+    rating_min=RATING_MIN,
+    rating_max=RATING_MAX,
+    quantity_min=QUANTITY_MIN,
+    price_min=PRICE_MIN,
+    tolerance=TOLERANCE,
+    output_dir=OUTPUT_DIR,
+)
 
 # ── Step 3: Extract ────────────────────────────────────────────────
 def extract_data() -> pd.DataFrame:
@@ -307,7 +382,7 @@ def transform_data(df_raw: pd.DataFrame):
     Returns:
         tuple: (dim_branch, dim_product, fact_sales, dq_report)
     """
-    df_clean, dq_report = run_quality_checks(df_raw)
+    df_clean, dq_report = dq_checker.run(df_raw)
     # Use the shared ColumnStandardizer instance to standardize columns.
     df = standardizer.standardize(df_clean)
     df["sale_date"] = pd.to_datetime(df["sale_date"])
