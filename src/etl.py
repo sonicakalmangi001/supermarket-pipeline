@@ -461,6 +461,44 @@ class SupermarketTransformer:
         fact_sales.insert(0, "sales_key", range(1, len(fact_sales) + 1))
         return fact_sales
 
+class ETLPipeline:
+    """
+    Orchestrates the ETL transformation flow.
+
+    This class acts as a lightweight pipeline coordinator. For the current
+    refactor step, it delegates transformation work to the injected
+    SupermarketTransformer instance.
+
+    Keeping orchestration in a dedicated class makes the control flow easier
+    to extend later without forcing major changes to function-level callers.
+    """
+
+    def __init__(self, transformer: SupermarketTransformer) -> None:
+        """
+        Initialize the ETL pipeline.
+
+        Args:
+            transformer: Component responsible for validating raw data and
+                transforming it into star-schema tables.
+        """
+        self.transformer = transformer
+
+    def run(
+        self,
+        df_raw: pd.DataFrame
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
+        """
+        Execute the transformation portion of the ETL flow.
+
+        Args:
+            df_raw: Raw extracted supermarket sales data.
+
+        Returns:
+            A tuple of:
+                dim_branch, dim_product, fact_sales, dq_report
+        """
+        return self.transformer.transform(df_raw)
+
 standardizer = ColumnStandardizer(
     alias_map={
         "Tax 5%": "tax_amount",
@@ -482,7 +520,6 @@ standardizer = ColumnStandardizer(
         "Rating": "rating",
     }
 )
-
 dq_checker = DataQualityChecker(
     required_columns=REQUIRED_COLUMNS,
     allowed_branches=ALLOWED_BRANCHES,
@@ -499,6 +536,7 @@ dq_checker = DataQualityChecker(
 )
 
 transformer = SupermarketTransformer(standardizer, dq_checker)
+pipeline = ETLPipeline(transformer)
 
 # ── Step 3: Extract ────────────────────────────────────────────────
 def extract_data() -> pd.DataFrame:
@@ -536,10 +574,8 @@ def transform_data(
     """
     Transform raw supermarket data into star-schema tables.
 
-    This wrapper preserves the existing functional interface while delegating
-    the implementation to the SupermarketTransformer class. Keeping this
-    function allows incremental refactoring without forcing downstream code
-    or tests to change immediately.
+    This compatibility wrapper preserves the original functional interface
+    while delegating execution to the ETLPipeline instance.
 
     Args:
         df_raw: Raw input DataFrame from the extract stage.
@@ -548,7 +584,7 @@ def transform_data(
         A tuple of:
             dim_branch, dim_product, fact_sales, dq_report
     """
-    return transformer.transform(df_raw)
+    return pipeline.run(df_raw)
 
 # ── Step 5: Load ───────────────────────────────────────────────────
 def load_data(
@@ -902,7 +938,7 @@ def run_etl():
     """
     try:
         df_raw = extract_data()
-        dim_branch, dim_product, fact_sales, dq_report = transform_data(df_raw)
+        dim_branch, dim_product, fact_sales, dq_report = pipeline.run(df_raw)
 
         # Save CSVs locally always
         dim_branch.to_csv(OUTPUT_DIR  / "dim_branch.csv",  index=False)

@@ -142,6 +142,76 @@ def test_supermarket_transformer_builds_expected_tables(sample_raw_df, tmp_path)
     assert "sales_key" in fact_sales.columns
     assert dq_report["metrics"]["raw_row_count"] == 4
 
+def test_etl_pipeline_runs_transformation_flow(sample_raw_df, tmp_path):
+    """
+    Ensures ETLPipeline delegates correctly to SupermarketTransformer and
+    returns the expected transformed outputs.
+    """
+    from src.etl import (
+        ColumnStandardizer,
+        DataQualityChecker,
+        SupermarketTransformer,
+        ETLPipeline,
+        REQUIRED_COLUMNS,
+        ALLOWED_BRANCHES,
+        ALLOWED_CITIES,
+        ALLOWED_CUSTOMER_TYPES,
+        ALLOWED_GENDERS,
+        ALLOWED_PAYMENTS,
+        RATING_MIN,
+        RATING_MAX,
+        QUANTITY_MIN,
+        PRICE_MIN,
+        TOLERANCE,
+    )
+
+    standardizer = ColumnStandardizer(
+        alias_map={
+            "Tax 5%": "tax_amount",
+            "Total": "total_amount",
+            "Date": "sale_date",
+            "Time": "sale_time",
+            "Payment": "payment_method",
+            "Invoice ID": "invoice_id",
+            "Branch": "branch",
+            "City": "city",
+            "Customer type": "customer_type",
+            "Gender": "gender",
+            "Product line": "product_line",
+            "Unit price": "unit_price",
+            "Quantity": "quantity",
+            "cogs": "cogs",
+            "gross margin percentage": "gross_margin_pct",
+            "gross income": "gross_income",
+            "Rating": "rating",
+        }
+    )
+
+    dq_checker = DataQualityChecker(
+        required_columns=REQUIRED_COLUMNS,
+        allowed_branches=ALLOWED_BRANCHES,
+        allowed_cities=ALLOWED_CITIES,
+        allowed_customer_types=ALLOWED_CUSTOMER_TYPES,
+        allowed_genders=ALLOWED_GENDERS,
+        allowed_payments=ALLOWED_PAYMENTS,
+        rating_min=RATING_MIN,
+        rating_max=RATING_MAX,
+        quantity_min=QUANTITY_MIN,
+        price_min=PRICE_MIN,
+        tolerance=TOLERANCE,
+        output_dir=tmp_path,
+    )
+
+    transformer = SupermarketTransformer(standardizer, dq_checker)
+    pipeline = ETLPipeline(transformer)
+
+    dim_branch, dim_product, fact_sales, dq_report = pipeline.run(sample_raw_df)
+
+    assert len(dim_branch) == 3
+    assert len(dim_product) == 3
+    assert len(fact_sales) == 4
+    assert dq_report["metrics"]["clean_rows_after_invoice_dedup"] == 4
+
 # ── Dimension Tests ────────────────────────────────────────────────
 def test_dim_branch_row_count(sample_df):
     """
