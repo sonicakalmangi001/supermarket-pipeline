@@ -499,26 +499,28 @@ class ETLPipeline:
         """
         return self.transformer.transform(df_raw)
 
+COLUMN_ALIAS_MAP = {
+    "Tax 5%": "tax_amount",
+    "Total": "total_amount",
+    "Date": "sale_date",
+    "Time": "sale_time",
+    "Payment": "payment_method",
+    "Invoice ID": "invoice_id",
+    "Branch": "branch",
+    "City": "city",
+    "Customer type": "customer_type",
+    "Gender": "gender",
+    "Product line": "product_line",
+    "Unit price": "unit_price",
+    "Quantity": "quantity",
+    "cogs": "cogs",
+    "gross margin percentage": "gross_margin_pct",
+    "gross income": "gross_income",
+    "Rating": "rating",
+}
+
 standardizer = ColumnStandardizer(
-    alias_map={
-        "Tax 5%": "tax_amount",
-        "Total": "total_amount",
-        "Date": "sale_date",
-        "Time": "sale_time",
-        "Payment": "payment_method",
-        "Invoice ID": "invoice_id",
-        "Branch": "branch",
-        "City": "city",
-        "Customer type": "customer_type",
-        "Gender": "gender",
-        "Product line": "product_line",
-        "Unit price": "unit_price",
-        "Quantity": "quantity",
-        "cogs": "cogs",
-        "gross margin percentage": "gross_margin_pct",
-        "gross income": "gross_income",
-        "Rating": "rating",
-    }
+    alias_map=COLUMN_ALIAS_MAP
 )
 dq_checker = DataQualityChecker(
     required_columns=REQUIRED_COLUMNS,
