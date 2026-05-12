@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import kagglehub
 from flask import Flask
-import requests
+import re
 
 pd.set_option('display.max_columns', None)
 pd.set_option('display.float_format', '{:.2f}'.format)
@@ -48,36 +48,38 @@ PRICE_MIN              = 0.0
 TOLERANCE              = 0.02
 
 # ── Step 1: Standardize Columns ────────────────────────────────────
-def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
+def to_snake_case(name: str) -> str:
     """
-    Renames raw Kaggle dataset columns into a standardized snake_case format.
+    Converts a column name into snake_case.
+    """
+    name = name.strip().lower()
+    name = re.sub(r"[^a-z0-9]+", "_", name)
+    return re.sub(r"_+", "_", name).strip("_")
+
+
+def standardize_columns(
+    df: pd.DataFrame,
+    alias_map: dict[str, str] | None = None
+) -> pd.DataFrame:
+    """
+    Standardizes dataframe column names.
+
+    Logic:
+    1. If a column exists in alias_map, use that mapped value.
+    2. Otherwise, convert the column name to snake_case.
 
     Args:
-        df (pd.DataFrame): The raw dataframe with original supermarket headers.
+        df (pd.DataFrame): Input dataframe.
+        alias_map (dict[str, str] | None): Optional custom overrides.
 
     Returns:
-        pd.DataFrame: A dataframe with renamed, database-friendly columns.
+        pd.DataFrame: Dataframe with standardized column names.
     """
-    rename_map = {
-        "Tax 5%":                  "tax_amount",
-        "Total":                   "total_amount",
-        "Date":                    "sale_date",
-        "Time":                    "sale_time",
-        "Payment":                 "payment_method",
-        "Invoice ID":              "invoice_id",
-        "Branch":                  "branch",
-        "City":                    "city",
-        "Customer type":           "customer_type",
-        "Gender":                  "gender",
-        "Product line":            "product_line",
-        "Unit price":              "unit_price",
-        "Quantity":                "quantity",
-        "cogs":                    "cogs",
-        "gross margin percentage": "gross_margin_pct",
-        "gross income":            "gross_income",
-        "Rating":                  "rating",
-    }
-    return df.rename(columns=rename_map)
+    alias_map = alias_map or {}
+
+    return df.rename(
+        columns=lambda col: alias_map.get(col, to_snake_case(col))
+    )
 
 # ── Step 2: Data Quality Checks ────────────────────────────────────
 def run_quality_checks(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -273,7 +275,13 @@ def transform_data(df_raw: pd.DataFrame):
         tuple: (dim_branch, dim_product, fact_sales, dq_report)
     """
     df_clean, dq_report = run_quality_checks(df_raw)
-    df = standardize_columns(df_clean)
+    df = standardize_columns(
+    df_clean,
+    alias_map={
+        "Tax 5%": "tax_amount",
+        "gross margin percentage": "gross_margin_pct",
+    }
+    )
     df["sale_date"] = pd.to_datetime(df["sale_date"])
 
     dim_branch = (
