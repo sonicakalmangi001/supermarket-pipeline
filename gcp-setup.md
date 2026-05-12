@@ -106,10 +106,10 @@ tests/test_etl.py::test_dim_branch_row_count PASSED
 tests/test_etl.py::test_dim_product_row_count PASSED
 tests/test_etl.py::test_fact_sales_row_count PASSED
 ...
-19 passed
+20 passed
 ```
 
-All 19 tests must pass before redeploying.
+All 20 tests must pass before redeploying.
 
 ---
 

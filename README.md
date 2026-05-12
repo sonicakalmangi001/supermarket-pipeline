@@ -12,7 +12,7 @@ Full release history is available on the [Releases page](https://github.com/soni
 |---|---|
 | [v1.0.0](https://github.com/sonicakalmangi001/supermarket-pipeline/releases/tag/v1.0.0) | Initial ETL pipeline with pandas, SQLite, data quality checks, star schema, 17 unit tests |
 | [v1.1.0](https://github.com/sonicakalmangi001/supermarket-pipeline/releases/tag/v1.1.0) | GCP Cloud Run deployment, BigQuery integration, Secret Manager, Cloud Scheduler |
-| [v1.2.0](https://github.com/sonicakalmangi001/supermarket-pipeline/releases/tag/v1.2.0) | Staging swap pattern for partial load prevention, load_summary.json, Cloud Monitoring alerts, load_summary.json unit tests (19 total) |
+| [v1.2.0](https://github.com/sonicakalmangi001/supermarket-pipeline/releases/tag/v1.2.0) | Staging swap pattern for partial load prevention, load_summary.json, Cloud Monitoring alerts, load_summary.json unit tests (20 total) |
 
 ---
 
@@ -262,8 +262,9 @@ tests/test_etl.py::test_valid_genders PASSED
 tests/test_etl.py::test_valid_payment_methods PASSED
 tests/test_etl.py::test_load_summary_created PASSED
 tests/test_etl.py::test_load_summary_no_failures PASSED 
+tests/test_etl.py::test_supermarket_transformer_builds_expected_tables PASSED
 
-19 passed
+20 passed
 ```
 
 ---

@@ -313,10 +313,173 @@ class DataQualityChecker:
 
         return clean_df, report
 
+class SupermarketTransformer:
+    """
+    Transforms validated supermarket sales data into a star schema.
+
+    This class coordinates:
+      1. Running data quality checks.
+      2. Standardizing cleaned column names.
+      3. Building dimension tables.
+      4. Building the fact table.
+
+    The public entry point is `transform(df_raw)`, which returns the
+    dimension tables, fact table, and the data quality report.
+    """
+
+    def __init__(
+        self,
+        standardizer: ColumnStandardizer,
+        dq_checker: DataQualityChecker,
+    ) -> None:
+        """
+        Initialize the transformer with collaborating components.
+
+        Args:
+            standardizer: Reusable column standardizer responsible for
+                converting raw column names into the canonical schema.
+            dq_checker: Data quality checker responsible for validating
+                and filtering raw data before transformation.
+        """
+        self.standardizer = standardizer
+        self.dq_checker = dq_checker
+
+    def transform(
+        self,
+        df_raw: pd.DataFrame
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
+        """
+        Transform raw supermarket data into star-schema tables.
+
+        Processing flow:
+          1. Validate and clean raw input.
+          2. Standardize column names.
+          3. Build branch and product dimensions.
+          4. Build fact_sales by attaching surrogate keys.
+
+        Args:
+            df_raw: Raw input DataFrame from the extraction stage.
+
+        Returns:
+            A tuple of:
+                dim_branch: Branch dimension table.
+                dim_product: Product dimension table.
+                fact_sales: Fact sales table.
+                dq_report: Data quality metrics and warnings.
+        """
+        df_clean, dq_report = self.dq_checker.run(df_raw)
+        df = self.standardizer.standardize(df_clean)
+        df["sale_date"] = pd.to_datetime(df["sale_date"])
+
+        dim_branch = self._build_dim_branch(df)
+        dim_product = self._build_dim_product(df)
+        fact_sales = self._build_fact_sales(df, dim_branch, dim_product)
+
+        return dim_branch, dim_product, fact_sales, dq_report
+
+    def _build_dim_branch(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Build the branch dimension table.
+
+        The branch dimension stores each unique branch/city combination and
+        assigns a surrogate integer key.
+
+        Args:
+            df: Cleaned and standardized sales DataFrame.
+
+        Returns:
+            A dimension table with columns:
+                branch_key, branch_code, city
+        """
+        dim_branch = (
+            df[["branch", "city"]]
+            .drop_duplicates()
+            .sort_values(["branch", "city"])
+            .reset_index(drop=True)
+            .rename(columns={"branch": "branch_code"})
+        )
+        dim_branch["branch_key"] = range(1, len(dim_branch) + 1)
+        return dim_branch[["branch_key", "branch_code", "city"]]
+
+    def _build_dim_product(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Build the product dimension table.
+
+        The product dimension stores each unique product line and assigns
+        a surrogate integer key.
+
+        Args:
+            df: Cleaned and standardized sales DataFrame.
+
+        Returns:
+            A dimension table with columns:
+                product_key, product_line
+        """
+        dim_product = (
+            df[["product_line"]]
+            .drop_duplicates()
+            .sort_values(["product_line"])
+            .reset_index(drop=True)
+        )
+        dim_product["product_key"] = range(1, len(dim_product) + 1)
+        return dim_product[["product_key", "product_line"]]
+
+    def _build_fact_sales(
+        self,
+        df: pd.DataFrame,
+        dim_branch: pd.DataFrame,
+        dim_product: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Build the fact_sales table by joining dimension surrogate keys.
+
+        Args:
+            df: Cleaned and standardized sales DataFrame.
+            dim_branch: Branch dimension table.
+            dim_product: Product dimension table.
+
+        Returns:
+            A fact table containing transaction-level sales metrics and
+            foreign keys into the branch and product dimensions.
+        """
+        fact_sales = (
+            df.merge(
+                dim_branch.rename(columns={"branch_code": "branch"}),
+                on=["branch", "city"],
+                how="left",
+            )
+            .merge(dim_product, on="product_line", how="left")
+        )
+
+        fact_sales = fact_sales[[
+            "invoice_id", "branch_key", "product_key", "sale_date", "sale_time",
+            "customer_type", "gender", "payment_method", "unit_price", "quantity",
+            "tax_amount", "total_amount", "cogs", "gross_margin_pct",
+            "gross_income", "rating"
+        ]].copy()
+
+        fact_sales.insert(0, "sales_key", range(1, len(fact_sales) + 1))
+        return fact_sales
+
 standardizer = ColumnStandardizer(
     alias_map={
         "Tax 5%": "tax_amount",
+        "Total": "total_amount",
+        "Date": "sale_date",
+        "Time": "sale_time",
+        "Payment": "payment_method",
+        "Invoice ID": "invoice_id",
+        "Branch": "branch",
+        "City": "city",
+        "Customer type": "customer_type",
+        "Gender": "gender",
+        "Product line": "product_line",
+        "Unit price": "unit_price",
+        "Quantity": "quantity",
+        "cogs": "cogs",
         "gross margin percentage": "gross_margin_pct",
+        "gross income": "gross_income",
+        "Rating": "rating",
     }
 )
 
@@ -334,6 +497,8 @@ dq_checker = DataQualityChecker(
     tolerance=TOLERANCE,
     output_dir=OUTPUT_DIR,
 )
+
+transformer = SupermarketTransformer(standardizer, dq_checker)
 
 # ── Step 3: Extract ────────────────────────────────────────────────
 def extract_data() -> pd.DataFrame:
@@ -365,60 +530,25 @@ def extract_data() -> pd.DataFrame:
     return pd.read_csv(csv_files[0])
 
 # ── Step 4: Transform ──────────────────────────────────────────────
-def transform_data(df_raw: pd.DataFrame):
+def transform_data(
+    df_raw: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
     """
-    Transforms raw data into a Star Schema (Fact and Dimension tables).
+    Transform raw supermarket data into star-schema tables.
 
-    Operations:
-    1. Runs Data Quality checks.
-    2. Standardizes column names.
-    3. Extracts `dim_branch` (Branch and City mapping).
-    4. Extracts `dim_product` (Unique product lines).
-    5. Creates `fact_sales` by mapping dimension keys and filtering columns.
+    This wrapper preserves the existing functional interface while delegating
+    the implementation to the SupermarketTransformer class. Keeping this
+    function allows incremental refactoring without forcing downstream code
+    or tests to change immediately.
 
     Args:
-        df_raw (pd.DataFrame): The raw data from the extraction phase.
+        df_raw: Raw input DataFrame from the extract stage.
 
     Returns:
-        tuple: (dim_branch, dim_product, fact_sales, dq_report)
+        A tuple of:
+            dim_branch, dim_product, fact_sales, dq_report
     """
-    df_clean, dq_report = dq_checker.run(df_raw)
-    # Use the shared ColumnStandardizer instance to standardize columns.
-    df = standardizer.standardize(df_clean)
-    df["sale_date"] = pd.to_datetime(df["sale_date"])
-
-    dim_branch = (
-        df[["branch", "city"]]
-        .drop_duplicates()
-        .sort_values(["branch", "city"])
-        .reset_index(drop=True)
-        .rename(columns={"branch": "branch_code"})
-    )
-    dim_branch["branch_key"] = range(1, len(dim_branch) + 1)
-    dim_branch = dim_branch[["branch_key", "branch_code", "city"]]
-
-    dim_product = (
-        df[["product_line"]]
-        .drop_duplicates()
-        .sort_values(["product_line"])
-        .reset_index(drop=True)
-    )
-    dim_product["product_key"] = range(1, len(dim_product) + 1)
-    dim_product = dim_product[["product_key", "product_line"]]
-
-    fact_sales = (
-        df.merge(dim_branch.rename(columns={"branch_code": "branch"}), on=["branch", "city"], how="left")
-        .merge(dim_product, on="product_line", how="left")
-    )
-    fact_sales = fact_sales[[
-        "invoice_id", "branch_key", "product_key", "sale_date", "sale_time",
-        "customer_type", "gender", "payment_method", "unit_price", "quantity",
-        "tax_amount", "total_amount", "cogs", "gross_margin_pct",
-        "gross_income", "rating"
-    ]].copy()
-    fact_sales.insert(0, "sales_key", range(1, len(fact_sales) + 1))
-
-    return dim_branch, dim_product, fact_sales, dq_report
+    return transformer.transform(df_raw)
 
 # ── Step 5: Load ───────────────────────────────────────────────────
 def load_data(

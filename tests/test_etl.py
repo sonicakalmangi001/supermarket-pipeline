@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-
 # ── Test Data ──────────────────────────────────────────────────────
 @pytest.fixture
 def sample_df():
@@ -38,6 +37,110 @@ def sample_df():
     }
     return pd.DataFrame(data)
 
+@pytest.fixture
+def sample_raw_df():
+    """
+    Provides a small raw-format DataFrame using the original supermarket
+    source column names. This fixture is used to test the end-to-end
+    transformation flow from raw input through dimensions and fact table.
+    """
+    data = {
+        "Invoice ID": ["INV-001", "INV-002", "INV-003", "INV-004"],
+        "Branch": ["A", "A", "B", "C"],
+        "City": ["Yangon", "Yangon", "Mandalay", "Naypyitaw"],
+        "Customer type": ["Member", "Normal", "Member", "Normal"],
+        "Gender": ["Female", "Male", "Female", "Male"],
+        "Product line": [
+            "Food and beverages",
+            "Health and beauty",
+            "Food and beverages",
+            "Sports and travel",
+        ],
+        "Unit price": [10.0, 20.0, 30.0, 40.0],
+        "Quantity": [1, 2, 3, 4],
+        "Tax 5%": [0.5, 1.0, 1.5, 2.0],
+        "Total": [10.5, 21.0, 31.5, 42.0],
+        "Date": ["01/01/2019", "01/02/2019", "01/03/2019", "01/04/2019"],
+        "Time": ["10:00", "11:00", "12:00", "13:00"],
+        "Payment": ["Cash", "Credit card", "Ewallet", "Cash"],
+        "cogs": [10.0, 20.0, 30.0, 40.0],
+        "gross margin percentage": [4.76, 4.76, 4.76, 4.76],
+        "gross income": [0.5, 1.0, 1.5, 2.0],
+        "Rating": [8.0, 7.0, 9.0, 6.0],
+    }
+    return pd.DataFrame(data)
+
+
+def test_supermarket_transformer_builds_expected_tables(sample_raw_df, tmp_path):
+    """
+    Ensures SupermarketTransformer produces the expected dimensions and fact
+    table from a valid raw-format input DataFrame.
+    """
+    from src.etl import (
+        ColumnStandardizer,
+        DataQualityChecker,
+        SupermarketTransformer,
+        REQUIRED_COLUMNS,
+        ALLOWED_BRANCHES,
+        ALLOWED_CITIES,
+        ALLOWED_CUSTOMER_TYPES,
+        ALLOWED_GENDERS,
+        ALLOWED_PAYMENTS,
+        RATING_MIN,
+        RATING_MAX,
+        QUANTITY_MIN,
+        PRICE_MIN,
+        TOLERANCE,
+    )
+
+    standardizer = ColumnStandardizer(
+        alias_map={
+            "Tax 5%": "tax_amount",
+            "Total": "total_amount",
+            "Date": "sale_date",
+            "Time": "sale_time",
+            "Payment": "payment_method",
+            "Invoice ID": "invoice_id",
+            "Branch": "branch",
+            "City": "city",
+            "Customer type": "customer_type",
+            "Gender": "gender",
+            "Product line": "product_line",
+            "Unit price": "unit_price",
+            "Quantity": "quantity",
+            "cogs": "cogs",
+            "gross margin percentage": "gross_margin_pct",
+            "gross income": "gross_income",
+            "Rating": "rating",
+        }
+    )
+
+    dq_checker = DataQualityChecker(
+        required_columns=REQUIRED_COLUMNS,
+        allowed_branches=ALLOWED_BRANCHES,
+        allowed_cities=ALLOWED_CITIES,
+        allowed_customer_types=ALLOWED_CUSTOMER_TYPES,
+        allowed_genders=ALLOWED_GENDERS,
+        allowed_payments=ALLOWED_PAYMENTS,
+        rating_min=RATING_MIN,
+        rating_max=RATING_MAX,
+        quantity_min=QUANTITY_MIN,
+        price_min=PRICE_MIN,
+        tolerance=TOLERANCE,
+        output_dir=tmp_path,
+    )
+
+    transformer = SupermarketTransformer(standardizer, dq_checker)
+
+    dim_branch, dim_product, fact_sales, dq_report = transformer.transform(sample_raw_df)
+
+    assert len(dim_branch) == 3
+    assert len(dim_product) == 3
+    assert len(fact_sales) == 4
+    assert "branch_key" in dim_branch.columns
+    assert "product_key" in dim_product.columns
+    assert "sales_key" in fact_sales.columns
+    assert dq_report["metrics"]["raw_row_count"] == 4
 
 # ── Dimension Tests ────────────────────────────────────────────────
 def test_dim_branch_row_count(sample_df):
